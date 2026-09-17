@@ -1,0 +1,16 @@
+# Manitoba HVDC's installer, not ours to redistribute.
+*.zip
+PSCAD_*_installer/
+
+# Built from fix/pscad_shim.c at install time.
+*.so
+
+# Launchers the installer generates.  They carry machine- and site-specific
+# paths, search domains and License Manager addresses.
+/pscad
+/pscad-desktop
+/fortranmedic
+
+# Install artefacts.
+prefix/
+winetricks-*.log
