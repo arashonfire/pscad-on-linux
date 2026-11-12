@@ -84,7 +84,7 @@ Hyprland, and `pscad` on X11. Its window class matches that launcher, so the
 bar can associate the running window with PSCAD's icon.
 
 Useful options: `--root DIR` to install somewhere other than
-`~/PSCAD_<version>`, `--gfortran DIR` to name the GFortran installer for 5.1
+`~/PSCAD_<version>`, `--gfortran DIR` to use a local GFortran installer
 (see below), `--lm-server ADDR` if you license from a legacy License Manager,
 `--edition EDU` to have PSCAD ask that License Manager for Educational first,
 `--dpi 192` for 200% UI scaling if automatic detection cannot reach your
@@ -411,11 +411,31 @@ not: it ships the EMTDC libraries for GFortran 8.1 and 13.2 (`emtdc\GF81`,
 `emtdc\GF132`) but no compiler, so a fresh 5.1 prefix has none.
 
 The GFortran installers are the same MHI Installer Utility and install
-silently, so the script installs one when the prefix has no GFortran. It takes
-`--gfortran DIR`, or else the newest `GFortran*` folder it finds in
-`~/Downloads` -- the `GFortran81` inside an unpacked 5.0.x download does
-nicely. 4.x is skipped: 5.1 lists it as unsupported. Verified under Wine: the
-8.1 compiler builds and runs Fortran in a 5.1 prefix.
+silently. The script first uses `--gfortran DIR`, or the newest compatible
+`GFortran*` folder in `~/Downloads` -- including `GFortran81` inside an
+unpacked 5.0.x download. If neither is available, it downloads GFortran 13.2
+for PSCAD 5.1, or 8.1 for PSCAD 5.0, from the public installers linked in
+[MHI's setup guide](https://www.pscad.com/knowledge-base/article/357).
+Downloads are cached under `<root>/installers` for subsequent runs.
+
+An installed compiler is reused. PSCAD 5.1 needs a supported 64-bit compiler;
+an old 4.x installation does not satisfy that check. The script checks that
+GFortran starts and stops with an error if downloading or installing it fails.
+Compiler installation output is saved to `<root>/install-gfortran.log`, and
+the version check to `<root>/gfortran-version.log`. MHI's detailed installer
+logs are in the prefix's `AppData/Local/Manitoba Hydro International/Installer/Messages`
+folder. Earlier script versions only warned and continued when no local
+compiler installer was available, leaving PSCAD's compiler list empty.
+
+To add the compiler to an existing PSCAD 5.1 installation, close PSCAD and run
+the installer again, using its existing root:
+
+```bash
+./install-pscad.sh --root ~/Software/PSCADv5_1 --force --skip-installer
+```
+
+For an offline installation, pass `--gfortran /path/to/GFortran132` after
+unpacking the top-level MHI installer archive. Leave its `Product` zip intact.
 
 PSCAD looks for compilers with `Utilities\CompilerDetector.exe`, which reads
 `HKLM\SOFTWARE\MHRC\GFortran\<version>` and the `GFORTRAN81` / `GFORTRAN132`

@@ -50,7 +50,8 @@ Install PSCAD 5 into its own Wine prefix.
                     Installer.exe and Product/GFortran*.zip.  PSCAD 5.1 ships
                     no Fortran compiler.  Default: the newest GFortran*
                     folder in ~/Downloads or inside a PSCAD 5.0.x installer
-                    there (PSCAD_502_*/GFortran81).
+                    there (PSCAD_502_*/GFortran81), otherwise download MHI's
+                    GFortran 13.2 for PSCAD 5.1, or 8.1 for PSCAD 5.0.
   --lm-server ADDR  Legacy License Manager address.  Only used to work out
                     which network interface faces the licence server; you
                     still enter the address in PSCAD itself.
@@ -678,12 +679,15 @@ say "Checking for a Fortran compiler"
 # (GFortran46, GFortran81).  5.1 ships only the EMTDC libraries for GFortran 8.1
 # and 13.2, not the compiler, so a 5.1 prefix ends up with none and every run
 # stops at "Fortran compiler not detected".  The GFortran installers are the
-# same MHI Installer Utility and install silently, so use one if there is one:
-# --gfortran, or a GFortran* folder in ~/Downloads, such as the GFortran81 in
-# a PSCAD 5.0.x download.  4.x is left out: 5.1 marks it unsupported.
+# same MHI Installer Utility and install silently. Prefer --gfortran, then a
+# GFortran* folder in ~/Downloads, such as the GFortran81 in a PSCAD 5.0.x
+# download. If neither exists, fetch the separate installer from MHI.
 find_gfortran() {
     (cd "$PREFIX" && find "drive_c/Program Files" "drive_c/Program Files (x86)" -maxdepth 5 \
-         -ipath '*/GFortran/*/gfortran.exe' 2>/dev/null | sort -V || true)
+         -ipath '*/GFortran/*/gfortran.exe' 2>/dev/null | sort -V \
+         | if [[ "$PSCAD_VERSION" = 5.1.* ]]; then
+               grep -E '/GFortran/(8\.1|13\.2)/x64/'
+           else cat; fi || true)
 }
 gfortran_installer() {
     local d best="" bestv=0 v
@@ -693,33 +697,77 @@ gfortran_installer() {
         compgen -G "${d}/Product/*.zip" >/dev/null || continue
         v=$(basename "$d" | grep -oE '[0-9]+' | head -1 || true)
         [ -n "$v" ] && [ "$v" -ge 80 ] || continue
+        [[ "$PSCAD_VERSION" != 5.0.* ]] || [ "$v" -eq 81 ] || continue
         if [ "$v" -gt "$bestv" ]; then best="$d"; bestv="$v"; fi
     done < <(find "${HOME}/Downloads" -maxdepth 2 -type d -iname 'GFortran*' 2>/dev/null || true)
     echo "$best"
 }
 
+download_gfortran() {
+    # Public downloads linked by https://www.pscad.com/knowledge-base/article/357.
+    # Cache under this installation so re-runs do not download hundreds of MB.
+    local package url cache archive
+    if [[ "$PSCAD_VERSION" = 5.0.* ]]; then
+        package=GFortran81
+        url="https://ptcstoragegroup.blob.core.windows.net/publisher/GFortran_81_W60XD4N8BR8062A48BXE/GFortran81_Installer.zip"
+    else
+        package=GFortran132
+        url="https://ptcstoragegroup.blob.core.windows.net/publisher/GFortran_132_C7W2APMR99V1U1BR9NH0/GFortran132_Installer.zip"
+    fi
+    cache="${PSCAD_ROOT}/installers/${package}"
+    archive="${PSCAD_ROOT}/installers/${package}_Installer.zip"
+    mkdir -p "$cache"
+    if [ ! -f "${cache}/Installer.exe" ] || [ ! -f "${cache}/Product/${package}.zip" ]; then
+        if [ ! -s "$archive" ]; then
+            info "Downloading ${package} from PSCAD's official download server."
+            curl --fail --location --retry 3 --connect-timeout 30 -o "${archive}.part" "$url" \
+                || die "Could not download ${package}. Check the network and re-run, or use --gfortran DIR."
+            mv "${archive}.part" "$archive"
+        fi
+        python3 - "$archive" "$cache" <<'EXTRACT_GF' \
+            || die "Could not unpack ${archive}. Remove it and re-run, or use --gfortran DIR."
+import sys
+import zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    archive.extractall(sys.argv[2])
+EXTRACT_GF
+    fi
+    GFORTRAN_DOWNLOADED_DIR="$cache"
+}
+
 compilers=$(find_gfortran)
 if [ -z "$compilers" ] || [ -n "$GFORTRAN_DIR" ]; then
     gf_dir=$(gfortran_installer)
-    if [ -n "$gf_dir" ] && [ -f "${gf_dir}/Installer.exe" ]; then
-        info "Installing $(basename "$gf_dir") from ${gf_dir}"
-        ( cd "$gf_dir" && wine Installer.exe /Silent=true ) >/dev/null 2>&1 || true
-        sleep 3
-        waited=0
-        while wine_busy && [ "$waited" -lt 1800 ]; do sleep 5; waited=$((waited + 5)); done
-        wait_for_wine
-        compilers=$(find_gfortran)
-    elif [ -n "$GFORTRAN_DIR" ]; then
-        warn "No Installer.exe in ${GFORTRAN_DIR}; not a GFortran installer folder."
+    if [ -z "$gf_dir" ]; then
+        download_gfortran
+        gf_dir="$GFORTRAN_DOWNLOADED_DIR"
     fi
+    [ -f "${gf_dir}/Installer.exe" ] \
+        || die "No Installer.exe in ${gf_dir}; pass --gfortran the unpacked MHI compiler installer folder."
+    info "Installing $(basename "$gf_dir") from ${gf_dir}"
+    gf_log="${PSCAD_ROOT}/install-gfortran.log"
+    # The original instance exits with 205 when it relaunches elevated.
+    # Wait for the child and check the installed compiler, not that exit code.
+    ( cd "$gf_dir" && wine Installer.exe /Silent=true ) >"$gf_log" 2>&1 || true
+    sleep 3
+    waited=0
+    while wine_busy; do
+        [ "$waited" -lt 1800 ] || die "GFortran installation timed out; see ${gf_log} and MHI's Installer/Messages logs."
+        sleep 5
+        waited=$((waited + 5))
+    done
+    wait_for_wine
+    compilers=$(find_gfortran)
 fi
-if [ -n "$compilers" ]; then
-    while IFS= read -r c; do info "${c#drive_c}"; done <<< "$compilers"
-else
-    warn "No Fortran compiler in the prefix, so PSCAD cannot build or run a model."
-    warn "Unpack an MHI GFortran installer (PSCAD 5.0.x downloads carry one as"
-    warn "GFortran81) and re-run with --force --skip-installer --gfortran DIR."
+[ -n "$compilers" ] \
+    || die "No supported GFortran compiler was installed. See ${PSCAD_ROOT}/install-gfortran.log and MHI's Installer/Messages logs."
+while IFS= read -r c; do info "${c#drive_c}"; done <<< "$compilers"
+# File presence alone can hide a broken installation or missing runtime DLLs.
+gf_compiler=$(printf '%s\n' "$compilers" | tail -1)
+if ! timeout 60 wine "${PREFIX}/${gf_compiler}" --version >"${PSCAD_ROOT}/gfortran-version.log" 2>&1; then
+    die "GFortran is installed but will not run; see ${PSCAD_ROOT}/gfortran-version.log."
 fi
+info "$(head -1 "${PSCAD_ROOT}/gfortran-version.log" | tr -d '\r')"
 
 # --------------------------------------------------------------------------
 say "Building the startup shim"
