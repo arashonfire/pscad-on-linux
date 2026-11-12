@@ -79,16 +79,36 @@ it also gives PSCAD a normal decorated, resizable window on desktops that have
 no equivalent of the KWin rule the script writes for KDE. Both launchers are
 otherwise identical.
 
+The application-menu entry uses `pscad-desktop` on Wayland, including
+Hyprland, and `pscad` on X11. Its window class matches that launcher, so the
+bar can associate the running window with PSCAD's icon.
+
 Useful options: `--root DIR` to install somewhere other than
 `~/PSCAD_<version>`, `--gfortran DIR` to name the GFortran installer for 5.1
 (see below), `--lm-server ADDR` if you license from a legacy License Manager,
 `--edition EDU` to have PSCAD ask that License Manager for Educational first,
-and `--skip-deps` if you manage distribution packages
-yourself. `--help` lists them all.
+`--dpi 192` for 200% UI scaling if automatic detection cannot reach your
+compositor, and `--skip-deps` if you manage distribution packages yourself.
+The required Linux tools are Wine, winetricks, curl, gcc and Python 3;
+Python's standard library extracts the original icon without Pillow.
+`--help` lists all options.
 
 To pick up an install that stopped part way through -- the wizard finished but
 the script did not -- re-run it with `--force --skip-installer`. Every step is
 safe to repeat.
+
+To apply the display and icon fixes to an existing installation, close PSCAD
+and other Wine programs in that prefix, then regenerate its configuration:
+
+```bash
+./install-pscad.sh \
+  --installer ~/Downloads/PSCAD_510_x64_Installer \
+  --root ~/PSCAD_5.1.0 --force --skip-installer --dpi 192
+```
+
+Use the root where PSCAD is already installed. This skips the PSCAD wizard;
+the script still checks prerequisites and refreshes the launchers, registry
+settings and desktop entry. Reopen PSCAD from the application menu afterwards.
 
 ## What the script does, and why
 
@@ -152,9 +172,12 @@ workarounds, described below.
 **Adds a KWin rule** so the window gets a real titlebar and resize borders.
 
 **Sets Wine's DPI** to match your desktop's display scaling, so PSCAD's text
-is not half the size of everything else on a HiDPI screen.
+is not half the size of everything else on a HiDPI screen. Both launchers
+reapply the selected DPI when starting, and the virtual desktop grows with
+it to preserve the working area.
 
-**Adds a desktop entry** so PSCAD appears in your application menu.
+**Adds a desktop entry** with PSCAD's original icon and the window class of
+the selected launcher, so PSCAD appears in your application menu and bar.
 
 ## The problems, and the fixes
 
@@ -565,10 +588,16 @@ shadows off in the prefix does not reach it either.
 
 Use `pscad-desktop` instead of `pscad`. It runs PSCAD inside a Wine virtual
 desktop, so every Wine window -- menus, shadows and dialogs -- is drawn inside
-one X11 window that the compositor never sees into. Change the size in the
-launcher's `explorer /desktop=PSCAD,1440x880` if the default does not suit
-your screen, and float the window rather than tiling it, since it is a fixed
-size:
+one X11 window that the compositor never sees into. Its default size follows
+the selected DPI: 1440×880 at 96 DPI, 2160×1320 at 144 DPI, and 2880×1760 at
+192 DPI. Override it for your screen if needed:
+
+```bash
+PSCAD_DESKTOP_SIZE=3200x1800 ~/PSCAD_5.1.0/pscad-desktop
+```
+
+Float the window rather than tiling it, since the virtual desktop has a fixed
+internal size. For example, on Hyprland versions using the older rule syntax:
 
 ```
 # Hyprland
@@ -632,19 +661,51 @@ Wine renders at 96 DPI whatever the desktop does, so on a scaled display PSCAD
 comes out much smaller than native applications.
 
 The install script reads your desktop's scaling and sets Wine's DPI to match,
-which scales PSCAD's fonts, icons and controls together. A 1.7x desktop gives
-163 DPI, a 1.25x desktop 120. It asks `kscreen-doctor` on KDE, `hyprctl` on
-Hyprland and `wlr-randr` on other wlroots compositors, and leaves PSCAD at 96
-DPI if none of them is there; pass `--dpi N` to say so yourself.
+which scales PSCAD's fonts, icons and controls together. A 2x desktop gives
+192 DPI, a 1.7x desktop 163, and a 1.25x desktop 120. It first asks `hyprctl`
+for Hyprland's monitor JSON, then tries `kscreen-doctor` for KDE and
+`wlr-randr` for other wlroots compositors. An installed tool that cannot
+reach a running session does not prevent the next one from being tried.
+The largest active monitor scale is used. If detection fails, the default
+is 96 DPI; pass `--dpi N` to set it explicitly.
 
-To change it afterwards, either re-run with `--dpi N`, or use the Graphics tab
-of winecfg:
+Both launchers remember the install-time DPI and reapply it before starting
+PSCAD. To try another value, close PSCAD and other programs in its prefix,
+then set `PSCAD_DPI` for the next launch:
 
 ```bash
-WINEPREFIX=~/PSCAD_5.1.0/prefix winecfg
+PSCAD_DPI=144 ~/PSCAD_5.1.0/pscad-desktop
 ```
 
-96 is 100%, 144 is 150%, 192 is 200%. Restart PSCAD after changing it.
+96 is 100%, 144 is 150%, 192 is 200%. Values must be whole numbers from 96 to
+480. To change the saved default, rerun the installer with `--force
+--skip-installer --dpi N`. Passing `--dpi 96` also resets a previously scaled
+prefix. A DPI chosen only in winecfg is replaced by the launcher's saved
+default on the next launch.
+
+### The application menu or Hyprland bar has no PSCAD icon
+
+The installer extracts the largest PNG frame from PSCAD's embedded main
+application icon, using Python 3 without additional modules. This works with
+PSCAD 5.1 even though its installer folder contains no `hvdc.ico`. Older icon
+formats fall back to ImageMagick or icoutils, or keep an existing icon when
+available. If extraction fails altogether, the installer reports it and uses
+a generic application icon.
+
+The icon is installed under
+`${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps/`, and the desktop
+entry points directly to that PNG so a stale theme cache cannot hide it.
+Entries go under the same data directory's `applications/` folder.
+
+The window class matters separately: `pscad` creates `pscad.exe` windows,
+while `pscad-desktop` creates an `explorer.exe` window containing PSCAD.
+The menu entry uses the virtual-desktop launcher and
+`StartupWMClass=explorer.exe` on Wayland; it uses the native launcher and
+`StartupWMClass=pscad.exe` on X11. If you manually switch the entry's `Exec`
+between these launchers, change `StartupWMClass` to match it too.
+
+Refresh an existing installation with `--force --skip-installer` as shown in
+Quick start, then close and reopen PSCAD from the application menu.
 
 ## Layout
 
@@ -709,10 +770,13 @@ handling off and confirm a problem is really the shim's doing, set
 - Dongle licensing cannot work, since Wine cannot load the USB driver.
 - Certificate licensing was not tested here; only the legacy License Manager.
 - The dependency step only knows `apt`. On other distributions install wine
-  (with 32-bit support), winetricks, curl and gcc yourself first.
+  (with 32-bit support), winetricks, curl, gcc and Python 3 yourself first.
 - The titlebar fix is written for KWin. Other window managers need the same
   idea applied their own way, or can use `pscad-desktop`.
 - Maximise cannot be made to work. Drag to resize instead.
+- Wine virtual desktops share the `explorer.exe` class. Bars that identify
+  windows only by class cannot distinguish PSCAD versions or other Wine
+  virtual desktops by their icons.
 - `py.exe`, the real Python launcher, does not work in any prefix; `py.bat`
   covers the arguments PSCAD uses and nothing more.
 - PSCAD's `install-packages.bat` cannot fully work under Wine, because Wine's

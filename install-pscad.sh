@@ -59,7 +59,7 @@ Install PSCAD 5 into its own Wine prefix.
                     new prefix asks for Professional until you pick one.
   --dpi N           Font/UI scale for PSCAD, in dots per inch.  96 is 100%,
                     144 is 150%, 192 is 200%.  Default: derived from your
-                    desktop's display scaling.
+                    desktop's display scaling. Whole numbers from 96 to 480.
   --skip-deps       Do not try to install distribution packages.
   --skip-installer  Do not run the PSCAD wizard; PSCAD is already in the
                     prefix.  Use with --force to finish an install that
@@ -69,6 +69,8 @@ Install PSCAD 5 into its own Wine prefix.
 
 The PSCAD installer itself is a graphical wizard, so this script needs a
 desktop session and will pause while you click through it.
+Generated launchers accept PSCAD_DPI to override the saved DPI and
+PSCAD_DESKTOP_SIZE=WIDTHxHEIGHT to override the virtual desktop's size.
 USAGE
 }
 
@@ -90,6 +92,12 @@ while [ $# -gt 0 ]; do
         *) die "unknown option: $1  (try --help)" ;;
     esac
 done
+
+if [ -n "$DPI" ]; then
+    [[ "$DPI" =~ ^[0-9]{2,3}$ ]] && ((10#$DPI >= 96 && 10#$DPI <= 480)) \
+        || die "--dpi must be a whole number from 96 to 480."
+    DPI=$((10#$DPI))
+fi
 
 PSCAD_EXE=""          # found after the wizard runs; the path carries the version
 PSCAD_VERSION=""
@@ -219,6 +227,7 @@ if [ "$SKIP_DEPS" -eq 0 ] && command -v apt-get >/dev/null; then
     command -v winetricks>/dev/null || missing+=(winetricks)
     command -v curl      >/dev/null || missing+=(curl)
     command -v gcc       >/dev/null || missing+=(gcc)
+    command -v python3   >/dev/null || missing+=(python3)
     dpkg -l wine32 2>/dev/null | grep -q '^ii' || missing+=(wine32)
     if [ ${#missing[@]} -gt 0 ]; then
         info "Installing: ${missing[*]}"
@@ -227,10 +236,10 @@ if [ "$SKIP_DEPS" -eq 0 ] && command -v apt-get >/dev/null; then
         sudo apt-get install -y "${missing[@]}"
     fi
 else
-    [ "$SKIP_DEPS" -eq 1 ] || warn "Not a Debian/Ubuntu system; install wine (with 32-bit support), winetricks, curl and gcc yourself."
+    [ "$SKIP_DEPS" -eq 1 ] || warn "Not a Debian/Ubuntu system; install wine (with 32-bit support), winetricks, curl, gcc and python3 yourself."
 fi
 
-for tool in wine winetricks curl gcc; do
+for tool in wine winetricks curl gcc python3; do
     command -v "$tool" >/dev/null || die "$tool is not installed."
 done
 info "Wine: $(wine --version)"
@@ -1041,30 +1050,40 @@ say "Matching PSCAD's text size to the desktop"
 # missing tool makes the whole pipeline exit 127, and `set -e` would then kill
 # the script here -- before the launcher below is ever written.
 desktop_scale() {
-    if command -v kscreen-doctor >/dev/null; then          # KDE
-        kscreen-doctor -o 2>/dev/null \
-            | sed 's/\x1b\[[0-9;]*m//g' \
-            | awk '/Scale:/ {print $2}' | sort -rn | head -1
-    elif command -v hyprctl >/dev/null; then               # Hyprland
-        hyprctl -j monitors 2>/dev/null \
-            | awk -F'[:,]' '/"scale"/ {gsub(/[[:space:]]/,"",$2); print $2}' \
-            | sort -rn | head -1
-    elif command -v wlr-randr >/dev/null; then             # other wlroots
-        wlr-randr 2>/dev/null | awk '/Scale:/ {print $2}' | sort -rn | head -1
+    local scale=""
+    # Ask the running compositor first. Installed KDE tools do not mean a KDE
+    # session is running, and Hyprland's JSON may be compact or pretty-printed.
+    if command -v hyprctl >/dev/null; then
+        scale=$(hyprctl -j monitors 2>/dev/null | python3 -c '
+import json, sys
+monitors = json.load(sys.stdin)
+scales = [float(m["scale"]) for m in monitors if not m.get("disabled", False)]
+print(max(scales, default=0))
+' 2>/dev/null || true)
     fi
+    if ! valid_scale "$scale" && command -v kscreen-doctor >/dev/null; then
+        scale=$(kscreen-doctor -o 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' \
+            | awk '/Scale:/ {print $2}' | sort -rn | head -1 || true)
+    fi
+    if ! valid_scale "$scale" && command -v wlr-randr >/dev/null; then
+        scale=$(wlr-randr 2>/dev/null | awk '/Scale:/ {print $2}' | sort -rn | head -1 || true)
+    fi
+    valid_scale "$scale" && printf '%s\n' "$scale"
+}
+
+valid_scale() {
+    [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v s="$1" 'BEGIN{exit !(s>0)}'
 }
 
 if [ -z "$DPI" ]; then
     scale=$(desktop_scale || true)
-    DPI=$(awk -v s="${scale:-1}" 'BEGIN{printf "%d", 96*(s>1?s:1)}')
+    DPI=$(awk -v s="${scale:-1}" 'BEGIN{d=96*(s>1?s:1); printf "%d", (d>480?480:d)+0.5}')
 fi
-if [ "$DPI" -gt 96 ] 2>/dev/null; then
-    wine reg add 'HKCU\Control Panel\Desktop' /v LogPixels /t REG_DWORD /d "$DPI" /f >/dev/null 2>&1
-    info "Set to ${DPI} DPI ($(awk -v d="$DPI" 'BEGIN{printf "%d", d*100/96}')%)."
-    info "Change it later with: WINEPREFIX=${PREFIX} winecfg  (Graphics tab)"
-else
-    info "Desktop is unscaled; leaving PSCAD at 96 DPI."
-fi
+# Write 96 too, so --dpi 96 can reset a previously scaled prefix.
+wine reg add 'HKCU\Control Panel\Desktop' /v LogPixels /t REG_DWORD /d "$DPI" /f >/dev/null 2>&1
+info "Set to ${DPI} DPI ($(awk -v d="$DPI" 'BEGIN{printf "%d", d*100/96}')%)."
+info "Launchers preserve this DPI; PSCAD_DPI overrides it for a launch."
 
 # --------------------------------------------------------------------------
 say "Preparing licensing"
@@ -1172,6 +1191,20 @@ LAUNCHER
 fi
 cat >> "${PSCAD_ROOT}/pscad" <<LAUNCHER
 
+# Keep the selected UI scale when Wine starts a new desktop or server.
+# Override it with PSCAD_DPI=144 (150%), for example.
+PSCAD_DPI="\${PSCAD_DPI:-${DPI}}"
+LAUNCHER
+cat >> "${PSCAD_ROOT}/pscad" <<'LAUNCHER'
+if ! [[ "$PSCAD_DPI" =~ ^[0-9]{2,3}$ ]] || ((10#$PSCAD_DPI < 96 || 10#$PSCAD_DPI > 480)); then
+    printf '%s\n' 'PSCAD_DPI must be a whole number from 96 to 480.' >&2
+    exit 1
+fi
+PSCAD_DPI=$((10#$PSCAD_DPI))
+wine reg add 'HKCU\Control Panel\Desktop' /v LogPixels /t REG_DWORD /d "$PSCAD_DPI" /f >/dev/null
+LAUNCHER
+cat >> "${PSCAD_ROOT}/pscad" <<LAUNCHER
+
 exec wine "\${WINEPREFIX}/${PSCAD_EXE}" "\$@"
 LAUNCHER
 chmod +x "${PSCAD_ROOT}/pscad"
@@ -1188,7 +1221,7 @@ chmod +x "${PSCAD_ROOT}/fortranmedic"
 # one X11 window, which no compositor can get wrong, and gives PSCAD a normal
 # decorated window on desktops with no equivalent of the KWin rule below.
 sed -e 's|^# Launch PSCAD in its own Wine prefix\.|# Launch PSCAD inside a Wine virtual desktop.\n#\n# Use this one if drop-down menus come up as black rectangles, or if your\n# window manager leaves PSCAD with no titlebar.  See README.md.|' \
-    -e 's|^exec wine "|exec wine explorer /desktop=PSCAD,1440x880 "|' \
+    -e 's|^exec wine "|exec wine explorer "/desktop=PSCAD,${PSCAD_DESKTOP_SIZE:-$((1440 * PSCAD_DPI / 96))x$((880 * PSCAD_DPI / 96))}" "|' \
     "${PSCAD_ROOT}/pscad" > "${PSCAD_ROOT}/pscad-desktop"
 chmod +x "${PSCAD_ROOT}/pscad-desktop"
 
@@ -1248,16 +1281,84 @@ fi
 say "Adding a desktop entry"
 # Named after the version, so installing 5.1 beside an existing 5.0 leaves
 # both in the application menu.
-apps="${HOME}/.local/share/applications"
-icons="${HOME}/.local/share/icons/hicolor/256x256/apps"
+data_dir="${XDG_DATA_HOME:-${HOME}/.local/share}"
+apps="${data_dir}/applications"
+icons="${data_dir}/icons/hicolor/256x256/apps"
 slug="pscad${PSCAD_VERSION:+-${PSCAD_VERSION}}"
 mkdir -p "$apps" "$icons"
 
-# 5.0.x ships hvdc.ico next to setup.exe; the 5.1 Installer Utility ships no
-# icon at all, so pull one out of Pscad.exe if icoutils is around.  Failing
-# both, the entry keeps whatever icon a previous install left behind.
-icon_name="$slug"
-if [ -f "${INSTALLER_DIR}/hvdc.ico" ]; then
+# PSCAD embeds its full-resolution icon in Pscad.exe. The 256px frame is PNG,
+# so Python's standard library can extract it without Pillow or icoutils.
+# Prefer the main application icon (resource group 128), then other groups.
+extract_pscad_icon() {
+    python3 - "${PREFIX}/${PSCAD_EXE}" "${icons}/${slug}.png" <<'PYICON'
+import struct
+import sys
+from pathlib import Path
+
+def extract(source):
+    data = source.read_bytes()
+    pe = struct.unpack_from('<I', data, 60)[0]
+    if data[:2] != b'MZ' or data[pe:pe + 4] != b'PE\0\0':
+        raise ValueError('Not a Windows executable')
+    count = struct.unpack_from('<H', data, pe + 6)[0]
+    optional = pe + 24
+    optional_size = struct.unpack_from('<H', data, pe + 20)[0]
+    directories = optional + (112 if struct.unpack_from('<H', data, optional)[0] == 0x20b else 96)
+    resource_rva = struct.unpack_from('<I', data, directories + 16)[0]
+    sections = [struct.unpack_from('<8sIIII', data, optional + optional_size + 40 * i)
+                for i in range(count)]
+
+    def offset(rva):
+        for _, virtual_size, address, raw_size, position in sections:
+            if address <= rva < address + max(virtual_size, raw_size):
+                return position + rva - address
+        raise ValueError('Resource is outside the executable sections')
+
+    root = offset(resource_rva)
+
+    def entries(relative):
+        position = root + relative
+        named, numbered = struct.unpack_from('<HH', data, position + 12)
+        return [struct.unpack_from('<II', data, position + 16 + 8 * i)
+                for i in range(named + numbered)]
+
+    def resources(kind):
+        for resource_type, directory in entries(0):
+            if resource_type != kind:
+                continue
+            for name, languages in entries(directory & 0x7fffffff):
+                for language, leaf in entries(languages & 0x7fffffff):
+                    rva, size = struct.unpack_from('<II', data, root + leaf)
+                    start = offset(rva)
+                    yield name, language, data[start:start + size]
+
+    icons = {(name, language): content for name, language, content in resources(3)}
+    groups = sorted(resources(14), key=lambda group: group[0] != 128)
+    for _, language, group in groups:
+        frames = []
+        for i in range(struct.unpack_from('<H', group, 4)[0]):
+            icon_id = struct.unpack_from('<H', group, 6 + 14 * i + 12)[0]
+            frame = icons.get((icon_id, language), b'')
+            if frame.startswith(b'\x89PNG\r\n\x1a\n'):
+                width, height = struct.unpack_from('>II', frame, 16)
+                frames.append((width * height, frame))
+        if frames:
+            return max(frames, key=lambda frame: frame[0])[1]
+    raise ValueError('No PNG icon frame; try ImageMagick or icoutils')
+
+try:
+    png = extract(Path(sys.argv[1]))
+    Path(sys.argv[2]).write_bytes(png)
+except (OSError, ValueError, struct.error) as error:
+    print(f'Could not extract PSCAD icon: {error}', file=sys.stderr)
+    sys.exit(1)
+PYICON
+}
+
+if extract_pscad_icon 2>/dev/null; then
+    info "Extracted PSCAD's original icon from Pscad.exe."
+elif [ -f "${INSTALLER_DIR}/hvdc.ico" ]; then
     for im in magick convert; do
         command -v "$im" >/dev/null || continue
         "$im" "${INSTALLER_DIR}/hvdc.ico[0]" -resize 256x256 "${icons}/${slug}.png" 2>/dev/null && break
@@ -1270,7 +1371,23 @@ elif command -v wrestool >/dev/null && command -v icotool >/dev/null; then
         && cp "$(find "$tmpico" -name '*.png' | head -1)" "${icons}/${slug}.png" 2>/dev/null || true
     rm -rf "$tmpico"
 fi
-[ -f "${icons}/${slug}.png" ] || icon_name="pscad"
+# Use an absolute path so an icon-theme cache cannot hide the new icon.
+# If extraction failed, keep a prior icon or use an installed generic icon.
+icon_name="application-x-executable"
+if [ -s "${icons}/${slug}.png" ]; then
+    icon_name="${icons}/${slug}.png"
+else
+    warn "Could not extract PSCAD's icon; install ImageMagick or icoutils and rerun."
+fi
+
+# The virtual desktop belongs to explorer.exe, not pscad.exe. Match the
+# launcher actually used by the menu entry, so Hyprland's bar can find it.
+desktop_launcher="pscad"
+desktop_class="pscad.exe"
+if [ -n "${WAYLAND_DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+    desktop_launcher="pscad-desktop"
+    desktop_class="explorer.exe"
+fi
 
 # Earlier versions of this script wrote an unversioned pscad.desktop.  If that
 # one launches this same root, the entry below replaces it; one that launches
@@ -1285,18 +1402,22 @@ Type=Application
 Name=PSCAD${PSCAD_VERSION:+ ${PSCAD_VERSION}}
 GenericName=Power System Simulation
 Comment=Manitoba HVDC PSCAD/EMTDC running under Wine
-Exec=${PSCAD_ROOT}/pscad %f
+Exec="${PSCAD_ROOT}/${desktop_launcher}" %f
 Icon=${icon_name}
 Terminal=false
 Categories=Science;Engineering;
-StartupWMClass=pscad.exe
+StartupWMClass=${desktop_class}
 DESKTOP
 update-desktop-database "$apps" 2>/dev/null || true
+if command -v gtk-update-icon-cache >/dev/null && [ -f "${data_dir}/icons/hicolor/index.theme" ]; then
+    gtk-update-icon-cache -f -t "${data_dir}/icons/hicolor" >/dev/null 2>&1 || true
+fi
+info "Menu launcher: ${PSCAD_ROOT}/${desktop_launcher} (${desktop_class})."
 
 # --------------------------------------------------------------------------
 say "Done"
 cat <<FINISH
-    Start PSCAD with:   ${PSCAD_ROOT}/pscad
+    Start PSCAD with:   ${PSCAD_ROOT}/${desktop_launcher}
     or from the application menu.
 
     Licensing is not configured yet.  Open PSCAD and enter your certificate
